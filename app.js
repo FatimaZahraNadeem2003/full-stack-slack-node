@@ -1,152 +1,30 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const connectDB = require('./config/db');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 connectDB();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-
 app.use(express.json());
 app.use(cors());
 
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+app.use('/api/auth', require('./routes/authRoutes'));
 
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-    req.user = user;
-    next();
-  });
-};
-
-const User = require('./models/User');
 const Message = require('./models/Message');
 const Space = require('./models/Space');
+const { protect } = require('./middleware/authMiddleware');
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend server is running!' });
 });
 
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { username, email, password } = req.body;
-
-    if (!username || !email || !password) {
-      return res.status(400).json({ message: 'Username, email, and password are required' });
-    }
-
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }]
-    });
-    if (existingUser) {
-      return res.status(409).json({ message: 'User already exists' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = new User({
-      username,
-      email,
-      password: hashedPassword
-    });
-
-    await newUser.save();
-
-    const token = jwt.sign(
-      { userId: newUser._id, username: newUser.username, email: newUser.email },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    const userResponse = {
-      id: newUser._id,
-      username: newUser.username,
-      email: newUser.email,
-      avatar: newUser.avatar,
-      isActive: newUser.isActive,
-      lastSeen: newUser.lastSeen,
-      createdAt: newUser.createdAt,
-      updatedAt: newUser.updatedAt
-    };
-    
-    res.status(201).json({
-      message: 'User registered successfully',
-      token,
-      user: userResponse
-    });
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required' });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-    
-    user.lastSeen = new Date();
-    await user.save();
-
-    const token = jwt.sign(
-      { userId: user._id, username: user.username, email: user.email },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    const userResponse = {
-      id: user._id,
-      username: user.username,
-      email: user.email,
-      avatar: user.avatar,
-      isActive: user.isActive,
-      lastSeen: user.lastSeen,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt
-    };
-    
-    res.json({
-      message: 'Login successful',
-      token,
-      user: userResponse
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-app.get('/api/messages', authenticateToken, async (req, res) => {
+app.get('/api/messages', protect, async (req, res) => {
   try {
     const spaceId = req.query.space || 'general'; 
     
- 
     const messages = await Message.find({ space: spaceId })
       .populate('sender', 'username email avatar')
       .populate('space', 'name')
@@ -173,10 +51,10 @@ app.get('/api/messages', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/messages', authenticateToken, async (req, res) => {
+app.post('/api/messages', protect, async (req, res) => {
   try {
     const { content, spaceId } = req.body;
-    const userId = req.user.userId; 
+    const userId = req.user._id; 
     
     if (!content || !spaceId) {
       return res.status(400).json({ error: 'Content and spaceId are required' });
@@ -223,9 +101,9 @@ app.post('/api/messages', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/spaces', authenticateToken, async (req, res) => {
+app.get('/api/spaces', protect, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     
     const spaces = await Space.find({
       'members.user': userId
@@ -255,10 +133,10 @@ app.get('/api/spaces', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/spaces', authenticateToken, async (req, res) => {
+app.post('/api/spaces', protect, async (req, res) => {
   try {
     const { name, description, type } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user._id;
     
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
@@ -302,10 +180,10 @@ app.post('/api/spaces', authenticateToken, async (req, res) => {
   }
 });
 
-app.post('/api/spaces/:spaceId/join', authenticateToken, async (req, res) => {
+app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
   try {
     const { spaceId } = req.params;
-    const userId = req.user.userId;
+    const userId = req.user._id;
     
     const space = await Space.findById(spaceId);
     if (!space) {
