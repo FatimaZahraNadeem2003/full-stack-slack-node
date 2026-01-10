@@ -56,12 +56,22 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('join_direct_messages', async (userIds) => {
+    if (Array.isArray(userIds)) {
+      userIds.forEach(userId => {
+        const directMessageRoom = [socket.userId, userId].sort().join('_');
+        socket.join(`dm_${directMessageRoom}`);
+        console.log(`User ${socket.userId} joined direct message room with ${userId}`);
+      });
+    }
+  });
+
   socket.on('send_message', async (data) => {
     try {
-      const { content, spaceId } = data;
+      const { content, spaceId, recipientId } = data; 
       
-      if (!content || !spaceId) {
-        socket.emit('error', { message: 'Content and spaceId are required' });
+      if (!content) {
+        socket.emit('error', { message: 'Content is required' });
         return;
       }
 
@@ -72,27 +82,62 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const Space = require('./models/Space');
-      const space = await Space.findById(spaceId);
-      if (!space) {
-        socket.emit('error', { message: 'Space not found' });
-        return;
-      }
+      let targetSpaceId = spaceId;
+      let isDirectMessage = false;
 
-      const isMember = space.members.some(member => 
-        member.user.toString() === socket.userId.toString()
-      );
+      if (recipientId) {
+        isDirectMessage = true;
+        const Space = require('./models/Space');
+        const userIds = [socket.userId, recipientId].sort();
+        const dmSpace = await Space.findOne({
+          type: 'direct',
+          members: { $size: 2 }, 
+          $and: [
+            { 'members': { $elemMatch: { user: userIds[0] } } },
+            { 'members': { $elemMatch: { user: userIds[1] } } }
+          ]
+        });
 
-      if (!isMember && user.role !== 'admin') {
-        socket.emit('error', { message: 'User is not a member of this space' });
-        return;
+        if (dmSpace) {
+          targetSpaceId = dmSpace._id;
+        } else {
+          const newDMSpace = new Space({
+            name: `DM_${userIds.join('_')}`, 
+            type: 'direct',
+            description: `Direct messages between ${user.username} and another user`,
+            members: [
+              { user: userIds[0], role: 'member' },
+              { user: userIds[1], role: 'member' }
+            ],
+            admins: [userIds[0]] 
+          });
+
+          await newDMSpace.save();
+          targetSpaceId = newDMSpace._id;
+        }
+      } else {
+        const Space = require('./models/Space');
+        const space = await Space.findById(spaceId);
+        if (!space) {
+          socket.emit('error', { message: 'Space not found' });
+          return;
+        }
+
+        const isMember = space.members.some(member => 
+          member.user.toString() === socket.userId.toString()
+        );
+
+        if (!isMember && user.role !== 'admin') {
+          socket.emit('error', { message: 'User is not a member of this space' });
+          return;
+        }
       }
 
       const Message = require('./models/Message');
       const newMessage = new Message({
         content,
         sender: socket.userId,
-        space: spaceId,
+        space: targetSpaceId,
         messageType: 'text'
       });
 
@@ -111,7 +156,12 @@ io.on('connection', (socket) => {
         isDeleted: newMessage.isDeleted
       };
 
-      emitToSpace(spaceId, 'receive_message', messageData);
+      if (isDirectMessage) {
+        const directMessageRoom = userIds.sort().join('_');
+        io.to(`dm_${directMessageRoom}`).emit('receive_direct_message', messageData);
+      } else {
+        emitToSpace(targetSpaceId, 'receive_message', messageData);
+      }
 
       socket.emit('message_sent', messageData);
     } catch (error) {
@@ -136,25 +186,202 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend server is running!' });
 });
 
+app.get('/api/direct-messages/conversations', protect, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    
+    const directMessageSpaces = await Space.find({
+      type: 'direct',
+      'members.user': userId
+    })
+    .populate('members.user', 'username email avatar role')
+    .populate({
+      path: 'members.user',
+      select: 'username email avatar role'
+    })
+    .sort({ lastActivity: -1 });
+
+    const conversations = directMessageSpaces.map(dmSpace => {
+      const otherParticipant = dmSpace.members.find(member => 
+        member.user._id.toString() !== userId.toString()
+      );
+      
+      return {
+        id: dmSpace._id,
+        spaceName: dmSpace.name,
+        type: dmSpace.type,
+        participants: dmSpace.members.map(member => ({
+          id: member.user._id,
+          username: member.user.username,
+          email: member.user.email,
+          role: member.user.role,
+          avatar: member.user.avatar
+        })),
+        otherUser: otherParticipant ? otherParticipant.user : null,
+        lastActivity: dmSpace.lastActivity
+      };
+    });
+
+    res.json({ conversations });
+  } catch (error) {
+    console.error('Error fetching direct message conversations:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/direct-messages/:conversationId', protect, async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user._id;
+
+    const dmSpace = await Space.findOne({
+      _id: conversationId,
+      type: 'direct',
+      'members.user': userId
+    });
+
+    if (!dmSpace) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const messages = await Message.find({ space: conversationId })
+      .populate('sender', 'username email avatar role')
+      .populate('space', 'name')
+      .sort({ createdAt: -1 })
+      .limit(50); 
+
+    res.json({
+      messages: messages.map(msg => ({
+        id: msg._id,
+        content: msg.content,
+        user: msg.sender.username,
+        userId: msg.sender._id,
+        userRole: msg.sender.role, 
+        spaceId: msg.space._id,
+        spaceName: msg.space.name,
+        timestamp: msg.createdAt,
+        messageType: msg.messageType,
+        isEdited: msg.isEdited,
+        isDeleted: msg.isDeleted
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching direct messages:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/direct-messages', protect, async (req, res) => {
+  try {
+    const { content, recipientId } = req.body;
+    const senderId = req.user._id;
+
+    if (!content || !recipientId) {
+      return res.status(400).json({ error: 'Content and recipientId are required' });
+    }
+
+    if (senderId.toString() === recipientId.toString()) {
+      return res.status(400).json({ error: 'Cannot send message to yourself' });
+    }
+
+    const Space = require('./models/Space');
+    const userIds = [senderId, recipientId].sort(); 
+    const dmSpace = await Space.findOne({
+      type: 'direct',
+      members: { $size: 2 }, 
+      $and: [
+        { 'members': { $elemMatch: { user: userIds[0] } } },
+        { 'members': { $elemMatch: { user: userIds[1] } } }
+      ]
+    });
+
+    let targetSpaceId;
+    if (dmSpace) {
+      targetSpaceId = dmSpace._id;
+    } else {
+      const User = require('./models/User');
+      const sender = await User.findById(senderId);
+      const recipient = await User.findById(recipientId);
+      
+      if (!sender || !recipient) {
+        return res.status(404).json({ error: 'Sender or recipient not found' });
+      }
+
+      const newDMSpace = new Space({
+        name: `DM_${userIds.join('_')}`, 
+        type: 'direct',
+        description: `Direct messages between ${sender.username} and ${recipient.username}`,
+        members: [
+          { user: userIds[0], role: 'member' },
+          { user: userIds[1], role: 'member' }
+        ],
+        admins: [userIds[0]] 
+      });
+
+      await newDMSpace.save();
+      targetSpaceId = newDMSpace._id;
+    }
+
+    const newMessage = new Message({
+      content,
+      sender: senderId,
+      space: targetSpaceId,
+      messageType: 'text' 
+    });
+
+    await newMessage.save();
+    await newMessage.populate('sender', 'username email avatar role');
+
+    const messageData = {
+      id: newMessage._id,
+      content: newMessage.content,
+      user: newMessage.sender.username,
+      userId: newMessage.sender._id,
+      userRole: newMessage.sender.role, 
+      spaceId: newMessage.space,
+      timestamp: newMessage.createdAt,
+      messageType: newMessage.messageType,
+      isEdited: newMessage.isEdited,
+      isDeleted: newMessage.isDeleted
+    };
+
+    await Space.findByIdAndUpdate(targetSpaceId, { lastActivity: new Date() });
+
+    res.status(201).json(messageData);
+  } catch (error) {
+    console.error('Error sending direct message:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 app.get('/api/messages', protect, async (req, res) => {
   try {
     const spaceId = req.query.space || 'general'; 
     
-    
-    let messagesQuery = { space: spaceId };
-    
-    if (req.user.role !== 'admin') {
-      const userSpaces = await Space.find({
-        'members.user': req.user._id
-      }).select('_id');
+    const space = await Space.findById(spaceId);
+    if (space && space.type === 'direct') {
+      const userId = req.user._id;
+      const isParticipant = space.members.some(member => 
+        member.user.toString() === userId.toString()
+      );
       
-      const userSpaceIds = userSpaces.map(space => space._id.toString());
-      if (!userSpaceIds.includes(spaceId)) {
+      if (!isParticipant && req.user.role !== 'admin') {
         return res.status(403).json({ error: 'Access denied' });
+      }
+    } else {
+      if (req.user.role !== 'admin') {
+        const userSpaces = await Space.find({
+          'members.user': req.user._id
+        }).select('_id');
+        
+        const userSpaceIds = userSpaces.map(space => space._id.toString());
+        if (!userSpaceIds.includes(spaceId)) {
+          return res.status(403).json({ error: 'Access denied' });
+        }
       }
     }
     
-    const messages = await Message.find(messagesQuery)
+    const messages = await Message.find({ space: spaceId })
       .populate('sender', 'username email avatar role')
       .populate('space', 'name')
       .sort({ createdAt: -1 })
@@ -195,12 +422,22 @@ app.post('/api/messages', protect, async (req, res) => {
       return res.status(404).json({ error: 'Space not found' });
     }
     
-    const isMember = space.members.some(member => 
-      member.user.toString() === userId.toString()
-    );
-    
-    if (!isMember && req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'User is not a member of this space' });
+    if (space.type === 'direct') {
+      const isParticipant = space.members.some(member => 
+        member.user.toString() === userId.toString()
+      );
+      
+      if (!isParticipant && req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'User is not a participant of this direct message' });
+      }
+    } else {
+      const isMember = space.members.some(member => 
+        member.user.toString() === userId.toString()
+      );
+      
+      if (!isMember && req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'User is not a member of this space' });
+      }
     }
     
     const newMessage = new Message({
@@ -227,6 +464,8 @@ app.post('/api/messages', protect, async (req, res) => {
       isDeleted: newMessage.isDeleted
     };
     
+    await Space.findByIdAndUpdate(spaceId, { lastActivity: new Date() });
+    
     emitToSpace(spaceId, 'receive_message', messageData);
     
     res.status(201).json(messageData);
@@ -245,7 +484,10 @@ app.get('/api/spaces', protect, async (req, res) => {
       spaces = await Space.find({}).populate('members.user', 'username email role');
     } else {
       spaces = await Space.find({
-        'members.user': userId
+        $or: [
+          { 'members.user': userId }, 
+          { type: 'direct', 'members.user': userId } 
+        ]
       }).populate('members.user', 'username email role');
     }
     
@@ -280,6 +522,10 @@ app.post('/api/spaces', protect, async (req, res) => {
     
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
+    }
+    
+    if (type === 'direct') {
+      return res.status(400).json({ error: 'Direct message spaces must be created through the direct message endpoint' });
     }
     
     const newSpace = new Space({
@@ -330,6 +576,10 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
     const space = await Space.findById(spaceId);
     if (!space) {
       return res.status(404).json({ error: 'Space not found' });
+    }
+    
+    if (space.type === 'direct') {
+      return res.status(400).json({ error: 'Cannot join direct message spaces' });
     }
     
     const isAlreadyMember = space.members.some(member => 
