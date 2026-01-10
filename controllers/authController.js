@@ -11,9 +11,8 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: 'Username, email, and password are required' });
     }
 
-    // Check if any users exist - if not, first user becomes admin
     const existingUsers = await User.countDocuments();
-    const isAdmin = existingUsers === 0; // First user is admin
+    const isAdmin = existingUsers === 0; 
 
     const existingUser = await User.findOne({
       $or: [{ email }, { username }]
@@ -28,7 +27,7 @@ const registerUser = async (req, res) => {
       username,
       email,
       password: hashedPassword,
-      role: isAdmin ? 'admin' : 'user' // Set role based on whether they're the first user
+      role: isAdmin ? 'admin' : 'user' 
     });
 
     await newUser.save();
@@ -38,7 +37,7 @@ const registerUser = async (req, res) => {
         userId: newUser._id, 
         username: newUser.username, 
         email: newUser.email,
-        role: newUser.role  // Include role in token
+        role: newUser.role  
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
@@ -94,7 +93,7 @@ const loginUser = async (req, res) => {
         userId: user._id, 
         username: user.username, 
         email: user.email,
-        role: user.role  // Include role in token
+        role: user.role 
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }

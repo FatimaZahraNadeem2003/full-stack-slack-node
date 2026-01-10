@@ -21,7 +21,6 @@ const notificationSchema = new mongoose.Schema({
   },
   relatedObjectId: {
     type: mongoose.Schema.Types.ObjectId,
-    // Could reference Message, Space, or other objects depending on the type
   },
   isRead: {
     type: Boolean,
@@ -34,17 +33,15 @@ const notificationSchema = new mongoose.Schema({
   },
   conversationId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Space', // Direct messages are also represented as spaces
+    ref: 'Space', 
     default: null,
   },
 }, {
-  timestamps: true, // Adds createdAt and updatedAt fields
+  timestamps: true, 
 });
 
-// Index for efficient querying by user and read status
 notificationSchema.index({ userId: 1, isRead: 1 });
 
-// Index for efficient querying by user and creation date
 notificationSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);
