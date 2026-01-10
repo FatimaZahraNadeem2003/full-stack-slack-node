@@ -957,9 +957,9 @@ app.get('/api/users/search', protect, async (req, res) => {
     }
     
     const users = await User.find({
-      _id: { $ne: userId }, 
+      _id: { $ne: userId },
       $or: [
-        { username: { $regex: q, $options: 'i' } }, 
+        { username: { $regex: q, $options: 'i' } },
         { email: { $regex: q, $options: 'i' } }
       ]
     })
@@ -989,5 +989,7 @@ server.listen(PORT, () => {
 });
 
 module.exports = app;
+
+
 
 
