@@ -56,11 +56,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle personal/direct message room joining
   socket.on('join_direct_messages', async (userIds) => {
     if (Array.isArray(userIds)) {
       userIds.forEach(userId => {
-        // Create a unique room for direct messages between two users
         const directMessageRoom = [socket.userId, userId].sort().join('_');
         socket.join(`dm_${directMessageRoom}`);
         console.log(`User ${socket.userId} joined direct message room with ${userId}`);
@@ -70,7 +68,7 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async (data) => {
     try {
-      const { content, spaceId, recipientId } = data; // recipientId for personal messages
+      const { content, spaceId, recipientId } = data; 
       
       if (!content) {
         socket.emit('error', { message: 'Content is required' });
@@ -87,15 +85,13 @@ io.on('connection', (socket) => {
       let targetSpaceId = spaceId;
       let isDirectMessage = false;
 
-      // Handle direct/personal messages
       if (recipientId) {
         isDirectMessage = true;
-        // Find or create a direct message space between the two users
         const Space = require('./models/Space');
-        const userIds = [socket.userId, recipientId].sort(); // Sort to ensure consistent ordering
+        const userIds = [socket.userId, recipientId].sort(); 
         const dmSpace = await Space.findOne({
           type: 'direct',
-          members: { $size: 2 }, // Direct message space should have exactly 2 members
+          members: { $size: 2 }, 
           $and: [
             { 'members': { $elemMatch: { user: userIds[0] } } },
             { 'members': { $elemMatch: { user: userIds[1] } } }
@@ -105,23 +101,21 @@ io.on('connection', (socket) => {
         if (dmSpace) {
           targetSpaceId = dmSpace._id;
         } else {
-          // Create a new direct message space
           const newDMSpace = new Space({
-            name: `DM_${userIds.join('_')}`, // Name in format DM_userId1_userId2
+            name: `DM_${userIds.join('_')}`, 
             type: 'direct',
             description: `Direct messages between ${user.username} and another user`,
             members: [
               { user: userIds[0], role: 'member' },
               { user: userIds[1], role: 'member' }
             ],
-            admins: [userIds[0]] // First user becomes admin by default
+            admins: [userIds[0]] 
           });
 
           await newDMSpace.save();
           targetSpaceId = newDMSpace._id;
         }
       } else {
-        // Handle group messages
         const Space = require('./models/Space');
         const space = await Space.findById(spaceId);
         if (!space) {
@@ -162,16 +156,13 @@ io.on('connection', (socket) => {
         isDeleted: newMessage.isDeleted
       };
 
-      // Emit to the appropriate room based on message type
       if (isDirectMessage) {
         const directMessageRoom = userIds.sort().join('_');
         io.to(`dm_${directMessageRoom}`).emit('receive_direct_message', messageData);
         
-        // Create notifications for direct message
         const Notification = require('./models/Notification');
         const recipient = await User.findById(recipientId);
         if (recipient) {
-          // Create notification for the recipient
           const notification = new Notification({
             userId: recipient._id,
             type: 'direct_message',
@@ -182,7 +173,6 @@ io.on('connection', (socket) => {
           });
           await notification.save();
           
-          // Emit notification to the recipient
           io.to(recipient._id.toString()).emit('new_notification', {
             id: notification._id,
             type: notification.type,
@@ -195,17 +185,15 @@ io.on('connection', (socket) => {
       } else {
         emitToSpace(targetSpaceId, 'receive_message', messageData);
         
-        // Create notifications for mentions and general messages
         const Space = require('./models/Space');
         const space = await Space.findById(targetSpaceId);
         
-        // Check for mentions in the message
         const mentionRegex = /@(\w+)/g;
         const mentions = content.match(mentionRegex);
         
         if (mentions) {
           for (const mention of mentions) {
-            const username = mention.substring(1); // Remove the @
+            const username = mention.substring(1);
             const mentionedUser = await User.findOne({ username: username });
             
             if (mentionedUser && mentionedUser._id.toString() !== socket.userId.toString()) {
@@ -219,7 +207,6 @@ io.on('connection', (socket) => {
               });
               await notification.save();
               
-              // Emit notification to the mentioned user
               io.to(mentionedUser._id.toString()).emit('new_notification', {
                 id: notification._id,
                 type: notification.type,
@@ -232,7 +219,6 @@ io.on('connection', (socket) => {
           }
         }
         
-        // Create notifications for other members in the space (excluding sender)
         if (space) {
           for (const member of space.members) {
             const memberId = member.user.toString();
@@ -247,7 +233,6 @@ io.on('connection', (socket) => {
               });
               await notification.save();
               
-              // Emit notification to the member
               io.to(memberId).emit('new_notification', {
                 id: notification._id,
                 type: notification.type,
@@ -285,12 +270,10 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend server is running!' });
 });
 
-// Endpoint to get all direct message conversations for a user
 app.get('/api/direct-messages/conversations', protect, async (req, res) => {
   try {
     const userId = req.user._id;
     
-    // Find all spaces of type 'direct' that the user is a member of
     const directMessageSpaces = await Space.find({
       type: 'direct',
       'members.user': userId
@@ -303,7 +286,6 @@ app.get('/api/direct-messages/conversations', protect, async (req, res) => {
     .sort({ lastActivity: -1 });
 
     const conversations = directMessageSpaces.map(dmSpace => {
-      // Get the other participant in the conversation
       const otherParticipant = dmSpace.members.find(member => 
         member.user._id.toString() !== userId.toString()
       );
@@ -331,13 +313,11 @@ app.get('/api/direct-messages/conversations', protect, async (req, res) => {
   }
 });
 
-// Endpoint to get messages for a direct message conversation
 app.get('/api/direct-messages/:conversationId', protect, async (req, res) => {
   try {
     const { conversationId } = req.params;
     const userId = req.user._id;
 
-    // Verify that the user is part of this direct message conversation
     const dmSpace = await Space.findOne({
       _id: conversationId,
       type: 'direct',
@@ -352,7 +332,7 @@ app.get('/api/direct-messages/:conversationId', protect, async (req, res) => {
       .populate('sender', 'username email avatar role')
       .populate('space', 'name')
       .sort({ createdAt: -1 })
-      .limit(50); // Limit to last 50 messages
+      .limit(50); 
 
     res.json({
       messages: messages.map(msg => ({
@@ -375,7 +355,6 @@ app.get('/api/direct-messages/:conversationId', protect, async (req, res) => {
   }
 });
 
-// Endpoint to send a direct message
 app.post('/api/direct-messages', protect, async (req, res) => {
   try {
     const { content, recipientId } = req.body;
@@ -389,12 +368,11 @@ app.post('/api/direct-messages', protect, async (req, res) => {
       return res.status(400).json({ error: 'Cannot send message to yourself' });
     }
 
-    // Find or create a direct message space between the two users
     const Space = require('./models/Space');
-    const userIds = [senderId, recipientId].sort(); // Sort to ensure consistent ordering
+    const userIds = [senderId, recipientId].sort(); 
     const dmSpace = await Space.findOne({
       type: 'direct',
-      members: { $size: 2 }, // Direct message space should have exactly 2 members
+      members: { $size: 2 },
       $and: [
         { 'members': { $elemMatch: { user: userIds[0] } } },
         { 'members': { $elemMatch: { user: userIds[1] } } }
@@ -405,7 +383,6 @@ app.post('/api/direct-messages', protect, async (req, res) => {
     if (dmSpace) {
       targetSpaceId = dmSpace._id;
     } else {
-      // Create a new direct message space
       const User = require('./models/User');
       const sender = await User.findById(senderId);
       const recipient = await User.findById(recipientId);
@@ -415,21 +392,20 @@ app.post('/api/direct-messages', protect, async (req, res) => {
       }
 
       const newDMSpace = new Space({
-        name: `DM_${userIds.join('_')}`, // Name in format DM_userId1_userId2
+        name: `DM_${userIds.join('_')}`, 
         type: 'direct',
         description: `Direct messages between ${sender.username} and ${recipient.username}`,
         members: [
           { user: userIds[0], role: 'member' },
           { user: userIds[1], role: 'member' }
         ],
-        admins: [userIds[0]] // First user becomes admin by default
+        admins: [userIds[0]] 
       });
 
       await newDMSpace.save();
       targetSpaceId = newDMSpace._id;
     }
 
-    // Create the message
     const newMessage = new Message({
       content,
       sender: senderId,
@@ -453,7 +429,6 @@ app.post('/api/direct-messages', protect, async (req, res) => {
       isDeleted: newMessage.isDeleted
     };
 
-    // Update the last activity in the space
     await Space.findByIdAndUpdate(targetSpaceId, { lastActivity: new Date() });
 
     res.status(201).json(messageData);
@@ -467,10 +442,8 @@ app.get('/api/messages', protect, async (req, res) => {
   try {
     const spaceId = req.query.space || 'general'; 
     
-    // Check if this is a direct message space
     const space = await Space.findById(spaceId);
     if (space && space.type === 'direct') {
-      // For direct messages, verify the user is a participant
       const userId = req.user._id;
       const isParticipant = space.members.some(member => 
         member.user.toString() === userId.toString()
@@ -480,7 +453,6 @@ app.get('/api/messages', protect, async (req, res) => {
         return res.status(403).json({ error: 'Access denied' });
       }
     } else {
-      // For group messages, use existing logic
       if (req.user.role !== 'admin') {
         const userSpaces = await Space.find({
           'members.user': req.user._id
@@ -534,7 +506,6 @@ app.post('/api/messages', protect, async (req, res) => {
       return res.status(404).json({ error: 'Space not found' });
     }
     
-    // Check if user has permission for direct messages
     if (space.type === 'direct') {
       const isParticipant = space.members.some(member => 
         member.user.toString() === userId.toString()
@@ -544,7 +515,6 @@ app.post('/api/messages', protect, async (req, res) => {
         return res.status(403).json({ error: 'User is not a participant of this direct message' });
       }
     } else {
-      // For group messages, use existing logic
       const isMember = space.members.some(member => 
         member.user.toString() === userId.toString()
       );
@@ -578,7 +548,6 @@ app.post('/api/messages', protect, async (req, res) => {
       isDeleted: newMessage.isDeleted
     };
     
-    // Update the last activity in the space
     await Space.findByIdAndUpdate(spaceId, { lastActivity: new Date() });
     
     emitToSpace(spaceId, 'receive_message', messageData);
@@ -594,15 +563,14 @@ app.get('/api/spaces', protect, async (req, res) => {
   try {
     const userId = req.user._id;
     
-    // Include both regular spaces and direct message spaces
     let spaces;
     if (req.user.role === 'admin') {
       spaces = await Space.find({}).populate('members.user', 'username email role');
     } else {
       spaces = await Space.find({
         $or: [
-          { 'members.user': userId }, // Regular spaces the user belongs to
-          { type: 'direct', 'members.user': userId } // Direct message spaces the user participates in
+          { 'members.user': userId }, 
+          { type: 'direct', 'members.user': userId } 
         ]
       }).populate('members.user', 'username email role');
     }
@@ -640,7 +608,6 @@ app.post('/api/spaces', protect, async (req, res) => {
       return res.status(400).json({ error: 'Name is required' });
     }
     
-    // Prevent creating direct message spaces through this endpoint
     if (type === 'direct') {
       return res.status(400).json({ error: 'Direct message spaces must be created through the direct message endpoint' });
     }
@@ -695,7 +662,6 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
       return res.status(404).json({ error: 'Space not found' });
     }
     
-    // Don't allow joining direct message spaces
     if (space.type === 'direct') {
       return res.status(400).json({ error: 'Cannot join direct message spaces' });
     }
@@ -726,7 +692,6 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
   }
 });
 
-// New endpoints for notifications
 app.get('/api/notifications', protect, async (req, res) => {
   try {
     const userId = req.user._id;
