@@ -6,17 +6,21 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Import Socket.IO
 const http = require('http');
 const socketIo = require('socket.io');
 const { setIO, emitToSpace } = require('./utils/socketHandler');
 
+// Connect to database
 connectDB();
 
 app.use(express.json());
 app.use(cors());
 
+// Create HTTP server
 const server = http.createServer(app);
 
+// Initialize Socket.IO with CORS settings
 const io = socketIo(server, {
   cors: {
     origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:3000'],
@@ -24,28 +28,35 @@ const io = socketIo(server, {
   }
 });
 
+// Set the IO instance for global access
 setIO(io);
 
+// Middleware to authenticate socket connections
 io.use((socket, next) => {
+  // Extract token from handshake auth
   const token = socket.handshake.auth.token;
   
   if (!token) {
     return next(new Error('Authentication error'));
   }
 
+  // Verify JWT token
   const jwt = require('jsonwebtoken');
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     socket.userId = decoded.id;
+    socket.userRole = decoded.role; // Store user role
     next();
   } catch (err) {
     next(new Error('Invalid token'));
   }
 });
 
+// Handle socket connections
 io.on('connection', (socket) => {
   console.log('User connected:', socket.userId);
 
+  // Join user to their spaces
   socket.on('join_spaces', async (spaceIds) => {
     if (Array.isArray(spaceIds)) {
       spaceIds.forEach(spaceId => {
@@ -55,15 +66,18 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle sending messages
   socket.on('send_message', async (data) => {
     try {
       const { content, spaceId } = data;
       
+      // Validate required fields
       if (!content || !spaceId) {
         socket.emit('error', { message: 'Content and spaceId are required' });
         return;
       }
 
+      // Get user from authenticated socket
       const User = require('./models/User');
       const user = await User.findById(socket.userId);
       if (!user) {
@@ -71,6 +85,7 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // Check if user is member of the space
       const Space = require('./models/Space');
       const space = await Space.findById(spaceId);
       if (!space) {
@@ -82,11 +97,13 @@ io.on('connection', (socket) => {
         member.user.toString() === socket.userId.toString()
       );
 
-      if (!isMember) {
+      // Admins can join any space, regular users need to be members
+      if (!isMember && user.role !== 'admin') {
         socket.emit('error', { message: 'User is not a member of this space' });
         return;
       }
 
+      // Create message in database
       const Message = require('./models/Message');
       const newMessage = new Message({
         content,
@@ -98,6 +115,7 @@ io.on('connection', (socket) => {
       await newMessage.save();
       await newMessage.populate('sender', 'username email avatar');
 
+      // Prepare message data for broadcast
       const messageData = {
         id: newMessage._id,
         content: newMessage.content,
@@ -110,8 +128,10 @@ io.on('connection', (socket) => {
         isDeleted: newMessage.isDeleted
       };
 
+      // Broadcast message to all users in the space
       emitToSpace(spaceId, 'receive_message', messageData);
 
+      // Emit success to sender
       socket.emit('message_sent', messageData);
     } catch (error) {
       console.error('Error sending message via socket:', error);
@@ -119,6 +139,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle disconnect
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.userId);
   });
@@ -128,7 +149,8 @@ app.use('/api/auth', require('./routes/authRoutes'));
 
 const Message = require('./models/Message');
 const Space = require('./models/Space');
-const { protect } = require('./middleware/authMiddleware');
+const User = require('./models/User');
+const { protect, adminOnly } = require('./middleware/authMiddleware');
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend server is running!' });
@@ -138,8 +160,24 @@ app.get('/api/messages', protect, async (req, res) => {
   try {
     const spaceId = req.query.space || 'general'; 
     
-    const messages = await Message.find({ space: spaceId })
-      .populate('sender', 'username email avatar')
+    // Regular users can only see messages from spaces they belong to
+    // Admins can see messages from any space
+    let messagesQuery = { space: spaceId };
+    
+    if (req.user.role !== 'admin') {
+      // For non-admins, ensure they are a member of the space
+      const userSpaces = await Space.find({
+        'members.user': req.user._id
+      }).select('_id');
+      
+      const userSpaceIds = userSpaces.map(space => space._id.toString());
+      if (!userSpaceIds.includes(spaceId)) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+    
+    const messages = await Message.find(messagesQuery)
+      .populate('sender', 'username email avatar role')
       .populate('space', 'name')
       .sort({ createdAt: -1 })
       .limit(50); 
@@ -150,6 +188,7 @@ app.get('/api/messages', protect, async (req, res) => {
         content: msg.content,
         user: msg.sender.username,
         userId: msg.sender._id,
+        userRole: msg.sender.role, // Include user role
         spaceId: msg.space._id,
         spaceName: msg.space.name,
         timestamp: msg.createdAt,
@@ -178,11 +217,12 @@ app.post('/api/messages', protect, async (req, res) => {
       return res.status(404).json({ error: 'Space not found' });
     }
     
+    // Admins can post to any space, regular users need to be members
     const isMember = space.members.some(member => 
       member.user.toString() === userId.toString()
     );
     
-    if (!isMember) {
+    if (!isMember && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'User is not a member of this space' });
     }
     
@@ -195,13 +235,15 @@ app.post('/api/messages', protect, async (req, res) => {
     
     await newMessage.save();
     
-    await newMessage.populate('sender', 'username email avatar');
+    await newMessage.populate('sender', 'username email avatar role');
     
+    // Prepare message data
     const messageData = {
       id: newMessage._id,
       content: newMessage.content,
       user: newMessage.sender.username,
       userId: newMessage.sender._id,
+      userRole: newMessage.sender.role, // Include user role
       spaceId: newMessage.space,
       timestamp: newMessage.createdAt,
       messageType: newMessage.messageType,
@@ -209,6 +251,7 @@ app.post('/api/messages', protect, async (req, res) => {
       isDeleted: newMessage.isDeleted
     };
     
+    // Broadcast to all sockets in the space room
     emitToSpace(spaceId, 'receive_message', messageData);
     
     res.status(201).json(messageData);
@@ -222,9 +265,15 @@ app.get('/api/spaces', protect, async (req, res) => {
   try {
     const userId = req.user._id;
     
-    const spaces = await Space.find({
-      'members.user': userId
-    }).populate('members.user', 'username email');
+    // Admins can see all spaces, regular users only see their spaces
+    let spaces;
+    if (req.user.role === 'admin') {
+      spaces = await Space.find({}).populate('members.user', 'username email role');
+    } else {
+      spaces = await Space.find({
+        'members.user': userId
+      }).populate('members.user', 'username email role');
+    }
     
     res.json({
       spaces: spaces.map(space => ({
@@ -236,7 +285,7 @@ app.get('/api/spaces', protect, async (req, res) => {
           id: member.user._id,
           username: member.user.username,
           email: member.user.email,
-          role: member.role
+          role: member.user.role, // Include role
         })),
         isArchived: space.isArchived,
         lastActivity: space.lastActivity,
@@ -259,6 +308,8 @@ app.post('/api/spaces', protect, async (req, res) => {
       return res.status(400).json({ error: 'Name is required' });
     }
     
+    // Check if user is admin or regular user creating space
+    // Admins can create any type of space, regular users can create public/private spaces
     const newSpace = new Space({
       name,
       description,
@@ -267,15 +318,17 @@ app.post('/api/spaces', protect, async (req, res) => {
     
     const memberInfo = {
       user: userId,
-      role: 'admin'
+      role: req.user.role === 'admin' ? 'admin' : 'admin' // Creator becomes admin of the space
     };
     
     newSpace.members.push(memberInfo);
-    newSpace.admins.push(userId);
+    if (req.user.role === 'admin') {
+      newSpace.admins.push(userId);
+    }
     
     await newSpace.save();
     
-    await newSpace.populate('members.user', 'username email');
+    await newSpace.populate('members.user', 'username email role');
     
     res.status(201).json({
       id: newSpace._id,
@@ -284,7 +337,7 @@ app.post('/api/spaces', protect, async (req, res) => {
       type: newSpace.type,
       members: [{
         id: userId,
-        role: 'admin'
+        role: req.user.role === 'admin' ? 'admin' : 'admin'
       }],
       isArchived: newSpace.isArchived,
       lastActivity: newSpace.lastActivity,
@@ -315,10 +368,15 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
       return res.status(400).json({ error: 'User is already a member of this space' });
     }
     
+    // Admins can join any space
     space.members.push({
       user: userId,
-      role: 'member'
+      role: req.user.role === 'admin' ? 'admin' : 'member'
     });
+    
+    if (req.user.role === 'admin') {
+      space.admins.push(userId);
+    }
     
     await space.save();
     
@@ -329,6 +387,102 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
   }
 });
 
+// Admin-specific routes
+// Get all users
+app.get('/api/admin/users', protect, adminOnly, async (req, res) => {
+  try {
+    const users = await User.find({}).select('-password');
+    
+    res.json({
+      users: users.map(user => ({
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        isActive: user.isActive,
+        lastSeen: user.lastSeen,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Get all messages for monitoring
+app.get('/api/admin/messages', protect, adminOnly, async (req, res) => {
+  try {
+    const { spaceId, limit = 50, skip = 0 } = req.query;
+    
+    let query = {};
+    if (spaceId) {
+      query.space = spaceId;
+    }
+    
+    const messages = await Message.find(query)
+      .populate('sender', 'username email role')
+      .populate('space', 'name')
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit));
+    
+    res.json({
+      messages: messages.map(msg => ({
+        id: msg._id,
+        content: msg.content,
+        user: msg.sender.username,
+        userId: msg.sender._id,
+        userRole: msg.sender.role,
+        spaceId: msg.space._id,
+        spaceName: msg.space.name,
+        timestamp: msg.createdAt,
+        messageType: msg.messageType,
+        isEdited: msg.isEdited,
+        isDeleted: msg.isDeleted
+      })),
+      totalCount: await Message.countDocuments(query)
+    });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Get all spaces for admin monitoring
+app.get('/api/admin/spaces', protect, adminOnly, async (req, res) => {
+  try {
+    const spaces = await Space.find({})
+      .populate('members.user', 'username email role')
+      .populate('admins', 'username email');
+    
+    res.json({
+      spaces: spaces.map(space => ({
+        id: space._id,
+        name: space.name,
+        description: space.description,
+        type: space.type,
+        members: space.members.map(member => ({
+          id: member.user._id,
+          username: member.user.username,
+          email: member.user.email,
+          role: member.user.role,
+        })),
+        admins: space.admins,
+        isArchived: space.isArchived,
+        lastActivity: space.lastActivity,
+        createdAt: space.createdAt,
+        updatedAt: space.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching spaces:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// Start server with Socket.IO
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });

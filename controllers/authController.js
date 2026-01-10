@@ -11,10 +11,9 @@ const registerUser = async (req, res) => {
       return res.status(400).json({ message: 'Username, email, and password are required' });
     }
 
+    // Check if any users exist - if not, first user becomes admin
     const existingUsers = await User.countDocuments();
-    if (existingUsers > 0) {
-      return res.status(409).json({ message: 'An admin account already exists. Registration is closed.' });
-    }
+    const isAdmin = existingUsers === 0; // First user is admin
 
     const existingUser = await User.findOne({
       $or: [{ email }, { username }]
@@ -28,13 +27,19 @@ const registerUser = async (req, res) => {
     const newUser = new User({
       username,
       email,
-      password: hashedPassword
+      password: hashedPassword,
+      role: isAdmin ? 'admin' : 'user' // Set role based on whether they're the first user
     });
 
     await newUser.save();
 
     const token = jwt.sign(
-      { userId: newUser._id, username: newUser.username, email: newUser.email },
+      { 
+        userId: newUser._id, 
+        username: newUser.username, 
+        email: newUser.email,
+        role: newUser.role  // Include role in token
+      },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -43,6 +48,7 @@ const registerUser = async (req, res) => {
       id: newUser._id,
       username: newUser.username,
       email: newUser.email,
+      role: newUser.role,
       avatar: newUser.avatar,
       isActive: newUser.isActive,
       lastSeen: newUser.lastSeen,
@@ -51,7 +57,7 @@ const registerUser = async (req, res) => {
     };
     
     res.status(201).json({
-      message: 'User registered successfully',
+      message: isAdmin ? 'Admin registered successfully' : 'User registered successfully',
       token,
       user: userResponse
     });
@@ -84,7 +90,12 @@ const loginUser = async (req, res) => {
     await user.save();
 
     const token = jwt.sign(
-      { userId: user._id, username: user.username, email: user.email },
+      { 
+        userId: user._id, 
+        username: user.username, 
+        email: user.email,
+        role: user.role  // Include role in token
+      },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -93,6 +104,7 @@ const loginUser = async (req, res) => {
       id: user._id,
       username: user.username,
       email: user.email,
+      role: user.role,
       avatar: user.avatar,
       isActive: user.isActive,
       lastSeen: user.lastSeen,
