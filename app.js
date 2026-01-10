@@ -6,10 +6,123 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+const http = require('http');
+const socketIo = require('socket.io');
+const { setIO, emitToSpace } = require('./utils/socketHandler');
+
 connectDB();
 
 app.use(express.json());
 app.use(cors());
+
+const server = http.createServer(app);
+
+const io = socketIo(server, {
+  cors: {
+    origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:3000'],
+    methods: ['GET', 'POST']
+  }
+});
+
+setIO(io);
+
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  
+  if (!token) {
+    return next(new Error('Authentication error'));
+  }
+
+  const jwt = require('jsonwebtoken');
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.userId = decoded.id;
+    next();
+  } catch (err) {
+    next(new Error('Invalid token'));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log('User connected:', socket.userId);
+
+  socket.on('join_spaces', async (spaceIds) => {
+    if (Array.isArray(spaceIds)) {
+      spaceIds.forEach(spaceId => {
+        socket.join(`space_${spaceId}`);
+        console.log(`User ${socket.userId} joined space ${spaceId}`);
+      });
+    }
+  });
+
+  socket.on('send_message', async (data) => {
+    try {
+      const { content, spaceId } = data;
+      
+      if (!content || !spaceId) {
+        socket.emit('error', { message: 'Content and spaceId are required' });
+        return;
+      }
+
+      const User = require('./models/User');
+      const user = await User.findById(socket.userId);
+      if (!user) {
+        socket.emit('error', { message: 'User not found' });
+        return;
+      }
+
+      const Space = require('./models/Space');
+      const space = await Space.findById(spaceId);
+      if (!space) {
+        socket.emit('error', { message: 'Space not found' });
+        return;
+      }
+
+      const isMember = space.members.some(member => 
+        member.user.toString() === socket.userId.toString()
+      );
+
+      if (!isMember) {
+        socket.emit('error', { message: 'User is not a member of this space' });
+        return;
+      }
+
+      const Message = require('./models/Message');
+      const newMessage = new Message({
+        content,
+        sender: socket.userId,
+        space: spaceId,
+        messageType: 'text'
+      });
+
+      await newMessage.save();
+      await newMessage.populate('sender', 'username email avatar');
+
+      const messageData = {
+        id: newMessage._id,
+        content: newMessage.content,
+        user: newMessage.sender.username,
+        userId: newMessage.sender._id,
+        spaceId: newMessage.space,
+        timestamp: newMessage.createdAt,
+        messageType: newMessage.messageType,
+        isEdited: newMessage.isEdited,
+        isDeleted: newMessage.isDeleted
+      };
+
+      emitToSpace(spaceId, 'receive_message', messageData);
+
+      socket.emit('message_sent', messageData);
+    } catch (error) {
+      console.error('Error sending message via socket:', error);
+      socket.emit('error', { message: 'Failed to send message' });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.userId);
+  });
+});
 
 app.use('/api/auth', require('./routes/authRoutes'));
 
@@ -84,7 +197,7 @@ app.post('/api/messages', protect, async (req, res) => {
     
     await newMessage.populate('sender', 'username email avatar');
     
-    res.status(201).json({
+    const messageData = {
       id: newMessage._id,
       content: newMessage.content,
       user: newMessage.sender.username,
@@ -94,7 +207,11 @@ app.post('/api/messages', protect, async (req, res) => {
       messageType: newMessage.messageType,
       isEdited: newMessage.isEdited,
       isDeleted: newMessage.isDeleted
-    });
+    };
+    
+    emitToSpace(spaceId, 'receive_message', messageData);
+    
+    res.status(201).json(messageData);
   } catch (error) {
     console.error('Error sending message:', error);
     res.status(500).json({ message: 'Internal server error' });
@@ -212,7 +329,7 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
 
