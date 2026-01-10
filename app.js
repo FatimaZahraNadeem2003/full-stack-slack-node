@@ -37,6 +37,7 @@ io.use((socket, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     socket.userId = decoded.id;
+    socket.userRole = decoded.role; 
     next();
   } catch (err) {
     next(new Error('Invalid token'));
@@ -82,7 +83,7 @@ io.on('connection', (socket) => {
         member.user.toString() === socket.userId.toString()
       );
 
-      if (!isMember) {
+      if (!isMember && user.role !== 'admin') {
         socket.emit('error', { message: 'User is not a member of this space' });
         return;
       }
@@ -128,7 +129,8 @@ app.use('/api/auth', require('./routes/authRoutes'));
 
 const Message = require('./models/Message');
 const Space = require('./models/Space');
-const { protect } = require('./middleware/authMiddleware');
+const User = require('./models/User');
+const { protect, adminOnly } = require('./middleware/authMiddleware');
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend server is running!' });
@@ -138,8 +140,22 @@ app.get('/api/messages', protect, async (req, res) => {
   try {
     const spaceId = req.query.space || 'general'; 
     
-    const messages = await Message.find({ space: spaceId })
-      .populate('sender', 'username email avatar')
+    
+    let messagesQuery = { space: spaceId };
+    
+    if (req.user.role !== 'admin') {
+      const userSpaces = await Space.find({
+        'members.user': req.user._id
+      }).select('_id');
+      
+      const userSpaceIds = userSpaces.map(space => space._id.toString());
+      if (!userSpaceIds.includes(spaceId)) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+    
+    const messages = await Message.find(messagesQuery)
+      .populate('sender', 'username email avatar role')
       .populate('space', 'name')
       .sort({ createdAt: -1 })
       .limit(50); 
@@ -150,6 +166,7 @@ app.get('/api/messages', protect, async (req, res) => {
         content: msg.content,
         user: msg.sender.username,
         userId: msg.sender._id,
+        userRole: msg.sender.role, 
         spaceId: msg.space._id,
         spaceName: msg.space.name,
         timestamp: msg.createdAt,
@@ -182,7 +199,7 @@ app.post('/api/messages', protect, async (req, res) => {
       member.user.toString() === userId.toString()
     );
     
-    if (!isMember) {
+    if (!isMember && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'User is not a member of this space' });
     }
     
@@ -195,13 +212,14 @@ app.post('/api/messages', protect, async (req, res) => {
     
     await newMessage.save();
     
-    await newMessage.populate('sender', 'username email avatar');
+    await newMessage.populate('sender', 'username email avatar role');
     
     const messageData = {
       id: newMessage._id,
       content: newMessage.content,
       user: newMessage.sender.username,
       userId: newMessage.sender._id,
+      userRole: newMessage.sender.role, 
       spaceId: newMessage.space,
       timestamp: newMessage.createdAt,
       messageType: newMessage.messageType,
@@ -222,9 +240,14 @@ app.get('/api/spaces', protect, async (req, res) => {
   try {
     const userId = req.user._id;
     
-    const spaces = await Space.find({
-      'members.user': userId
-    }).populate('members.user', 'username email');
+    let spaces;
+    if (req.user.role === 'admin') {
+      spaces = await Space.find({}).populate('members.user', 'username email role');
+    } else {
+      spaces = await Space.find({
+        'members.user': userId
+      }).populate('members.user', 'username email role');
+    }
     
     res.json({
       spaces: spaces.map(space => ({
@@ -236,7 +259,7 @@ app.get('/api/spaces', protect, async (req, res) => {
           id: member.user._id,
           username: member.user.username,
           email: member.user.email,
-          role: member.role
+          role: member.user.role,
         })),
         isArchived: space.isArchived,
         lastActivity: space.lastActivity,
@@ -267,15 +290,17 @@ app.post('/api/spaces', protect, async (req, res) => {
     
     const memberInfo = {
       user: userId,
-      role: 'admin'
+      role: req.user.role === 'admin' ? 'admin' : 'admin' 
     };
     
     newSpace.members.push(memberInfo);
-    newSpace.admins.push(userId);
+    if (req.user.role === 'admin') {
+      newSpace.admins.push(userId);
+    }
     
     await newSpace.save();
     
-    await newSpace.populate('members.user', 'username email');
+    await newSpace.populate('members.user', 'username email role');
     
     res.status(201).json({
       id: newSpace._id,
@@ -284,7 +309,7 @@ app.post('/api/spaces', protect, async (req, res) => {
       type: newSpace.type,
       members: [{
         id: userId,
-        role: 'admin'
+        role: req.user.role === 'admin' ? 'admin' : 'admin'
       }],
       isArchived: newSpace.isArchived,
       lastActivity: newSpace.lastActivity,
@@ -317,14 +342,110 @@ app.post('/api/spaces/:spaceId/join', protect, async (req, res) => {
     
     space.members.push({
       user: userId,
-      role: 'member'
+      role: req.user.role === 'admin' ? 'admin' : 'member'
     });
+    
+    if (req.user.role === 'admin') {
+      space.admins.push(userId);
+    }
     
     await space.save();
     
     res.json({ message: 'Successfully joined space', spaceId: space._id });
   } catch (error) {
     console.error('Error joining space:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+
+app.get('/api/admin/users', protect, adminOnly, async (req, res) => {
+  try {
+    const users = await User.find({}).select('-password');
+    
+    res.json({
+      users: users.map(user => ({
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        isActive: user.isActive,
+        lastSeen: user.lastSeen,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/admin/messages', protect, adminOnly, async (req, res) => {
+  try {
+    const { spaceId, limit = 50, skip = 0 } = req.query;
+    
+    let query = {};
+    if (spaceId) {
+      query.space = spaceId;
+    }
+    
+    const messages = await Message.find(query)
+      .populate('sender', 'username email role')
+      .populate('space', 'name')
+      .sort({ createdAt: -1 })
+      .skip(parseInt(skip))
+      .limit(parseInt(limit));
+    
+    res.json({
+      messages: messages.map(msg => ({
+        id: msg._id,
+        content: msg.content,
+        user: msg.sender.username,
+        userId: msg.sender._id,
+        userRole: msg.sender.role,
+        spaceId: msg.space._id,
+        spaceName: msg.space.name,
+        timestamp: msg.createdAt,
+        messageType: msg.messageType,
+        isEdited: msg.isEdited,
+        isDeleted: msg.isDeleted
+      })),
+      totalCount: await Message.countDocuments(query)
+    });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/admin/spaces', protect, adminOnly, async (req, res) => {
+  try {
+    const spaces = await Space.find({})
+      .populate('members.user', 'username email role')
+      .populate('admins', 'username email');
+    
+    res.json({
+      spaces: spaces.map(space => ({
+        id: space._id,
+        name: space.name,
+        description: space.description,
+        type: space.type,
+        members: space.members.map(member => ({
+          id: member.user._id,
+          username: member.user.username,
+          email: member.user.email,
+          role: member.user.role,
+        })),
+        admins: space.admins,
+        isArchived: space.isArchived,
+        lastActivity: space.lastActivity,
+        createdAt: space.createdAt,
+        updatedAt: space.updatedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching spaces:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
