@@ -125,10 +125,10 @@ const loginUser = async (req, res) => {
 
 const checkAdmin = async (req, res) => {
   try {
-    const userCount = await User.countDocuments();
+    const adminUser = await User.findOne({ role: 'admin' });
     res.json({ 
-      hasAdmin: userCount > 0,
-      userCount: userCount
+      hasAdmin: !!adminUser,
+      userCount: adminUser ? 1 : 0 
     });
   } catch (error) {
     console.error('Error checking admin status:', error);
@@ -136,8 +136,30 @@ const checkAdmin = async (req, res) => {
   }
 };
 
+const verifyToken = async (req, res) => {
+  try {
+   
+    res.json({
+      valid: true,
+      user: {
+        id: req.user._id,
+        username: req.user.username,
+        email: req.user.email,
+        role: req.user.role,
+        avatar: req.user.avatar,
+        isActive: req.user.isActive,
+        lastSeen: req.user.lastSeen
+      }
+    });
+  } catch (error) {
+    console.error('Token verification error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   registerUser,
   loginUser,
-  checkAdmin
+  checkAdmin,
+  verifyToken
 };

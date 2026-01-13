@@ -279,10 +279,6 @@ app.get('/api/direct-messages/conversations', protect, async (req, res) => {
       'members.user': userId
     })
     .populate('members.user', 'username email avatar role')
-    .populate({
-      path: 'members.user',
-      select: 'username email avatar role'
-    })
     .sort({ lastActivity: -1 });
 
     const conversations = directMessageSpaces.map(dmSpace => {
@@ -839,6 +835,68 @@ app.get('/api/admin/users', protect, adminOnly, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching users:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/admin/users', protect, adminOnly, async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ message: 'Username, email, and password are required' });
+    }
+
+    const existingUser = await User.findOne({
+      $or: [{ email }, { username }]
+    });
+    if (existingUser) {
+      return res.status(409).json({ message: 'User already exists' });
+    }
+
+    const bcrypt = require('bcryptjs');
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = new User({
+      username,
+      email,
+      password: hashedPassword,
+      role: 'user' 
+    });
+
+    await newUser.save();
+
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      { 
+        userId: newUser._id, 
+        username: newUser.username, 
+        email: newUser.email,
+        role: newUser.role 
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    const userResponse = {
+      id: newUser._id,
+      username: newUser.username,
+      email: newUser.email,
+      role: newUser.role,
+      avatar: newUser.avatar,
+      isActive: newUser.isActive,
+      lastSeen: newUser.lastSeen,
+      createdAt: newUser.createdAt,
+      updatedAt: newUser.updatedAt
+    };
+    
+    res.status(201).json({
+      message: 'User created successfully',
+      token,
+      user: userResponse
+    });
+  } catch (error) {
+    console.error('Error creating user:', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
