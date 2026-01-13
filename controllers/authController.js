@@ -40,7 +40,7 @@ const registerUser = async (req, res) => {
         role: newUser.role  
       },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: process.env.JWT_EXPIRATION || '30d' }
     );
 
     const userResponse = {
@@ -96,7 +96,7 @@ const loginUser = async (req, res) => {
         role: user.role 
       },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: process.env.JWT_EXPIRATION || '30d' }
     );
 
     const userResponse = {
