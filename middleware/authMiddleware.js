@@ -8,14 +8,21 @@ const protect = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(' ')[1];
 
+      // Debug logging to see what's happening
+      console.log('JWT Secret in use:', process.env.JWT_SECRET ? 'SET' : 'NOT SET');
+      console.log('Token received:', token ? 'PRESENT' : 'MISSING');
+      
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      console.log('Token decoded successfully:', decoded);
 
       req.user = await User.findById(decoded.userId).select('-password');
-      req.userRole = decoded.role; 
+      req.userRole = decoded.role;
 
       next();
     } catch (error) {
       console.error('Authentication error:', error);
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
       return res.status(401).json({ error: 'Not authorized, token failed' });
     }
   }
